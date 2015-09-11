@@ -16,8 +16,8 @@
  */
 
 /**
- * Tools to export Nutch segments to the
+ * Tools to import / export between Nutch segments and
  * <a href="http://bibnum.bnf.fr/warc/WARC_ISO_28500_version1_latestdraft.pdf">
- * WARC file format</a>.
+ * WARC archives</a>.
  */
 package org.apache.nutch.tools.warc;
