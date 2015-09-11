@@ -24,10 +24,13 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileStatus;
@@ -48,8 +51,8 @@ import org.apache.hadoop.mapred.RunningJob;
 import org.apache.hadoop.mapred.SequenceFileInputFormat;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
-import org.apache.nutch.crawl.CrawlDatum;
 import org.apache.nutch.crawl.NutchWritable;
+import org.apache.nutch.parse.ParseSegment;
 import org.apache.nutch.protocol.Content;
 import org.apache.nutch.util.HadoopFSUtil;
 import org.apache.nutch.util.NutchConfiguration;
@@ -63,7 +66,14 @@ import com.martinkl.warc.WARCWritable;
 import com.martinkl.warc.mapred.WARCOutputFormat;
 
 /**
- * MapReduce job to exports Nutch segments as WARC files.
+ * MapReduce job to exports Nutch segments as WARC files. The file format is
+ * documented in the [ISO
+ * Standard](http://bibnum.bnf.fr/warc/WARC_ISO_28500_version1_latestdraft.pdf).
+ * Currently does not generate metadata about the crawler and provides entities
+ * of type resource and not response; we'd need to reconstruct the HTTP headers
+ * from the metadata in order to do that or modify Nutch so that it can store
+ * the http headers verbatim in the content metadata (or at least the http
+ * code).
  **/
 
 public class WARCExporter extends Configured implements Tool {
@@ -84,6 +94,9 @@ public class WARCExporter extends Configured implements Tool {
   public static class WARCReducer
       implements Mapper<Text, Writable, Text, NutchWritable>,
       Reducer<Text, NutchWritable, NullWritable, WARCWritable> {
+
+    SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'",
+        Locale.ENGLISH);
 
     @Override
     public void configure(JobConf job) {
@@ -106,17 +119,12 @@ public class WARCExporter extends Configured implements Tool {
             throws IOException {
 
       Content content = null;
-      CrawlDatum cd = null;
 
       // aggregate the values found
       while (values.hasNext()) {
         final Writable value = values.next().get(); // unwrap
         if (value instanceof Content) {
           content = (Content) value;
-          continue;
-        }
-        if (value instanceof CrawlDatum) {
-          cd = (CrawlDatum) value;
           continue;
         }
       }
@@ -128,31 +136,16 @@ public class WARCExporter extends Configured implements Tool {
         return;
       }
 
-      if (cd == null) {
-        LOG.info("Missing fetch datum for {}", key);
-        reporter.getCounter("WARCExporter", "missing metadata").increment(1);
-        return;
-      }
-
       // TODO generate a string representation of the headers
       StringBuffer buf = new StringBuffer();
       buf.append(WARCRecord.WARC_VERSION);
       buf.append(CRLF);
 
-      // TODO select what we want to put there
-      // e.g. mandatory WARC metadata
-      // WARC-Type, WARC-Date,
-      // WARC-Target-URI: http://news.bbc.co.uk/2/hi/africa/3414345.stm
-
-      // WARC-Type: warcinfo
-      // WARC-Date: 2010-10-08T07:00:26Z
-      // WARC-Filename:
-      // LOC-MONTHLY-014-20101008070022-00127-crawling111.us.archive.org.warc.gz
-      // WARC-Record-ID: <urn:uuid:05de9500-7047-4206-aa7f-346a0dc91b1f>
-      // Content-Type: application/warc-fields
-
       // see
       // https://github.com/iipc/webarchive-commons/blob/master/src/main/java/org/archive/format/warc/WARCRecordWriter.java
+
+      buf.append("WARC-Record-ID").append(": ").append("<urn:uuid:")
+          .append(UUID.randomUUID().toString()).append(">").append(CRLF);
 
       int contentLength = 0;
       if (content != null) {
@@ -162,8 +155,32 @@ public class WARCExporter extends Configured implements Tool {
       buf.append("Content-Length").append(": ")
           .append(Integer.toString(contentLength)).append(CRLF);
 
-      buf.append("WARC-Record-ID").append(": ").append("<urn:uuid:")
-          .append(UUID.randomUUID().toString()).append(">").append(CRLF);
+      // time the warc entry was generated?
+      // TODO pull the fetch time instead
+      buf.append("WARC-Date").append(": ").append(df.format(new Date()))
+          .append(CRLF);
+
+      // using resource and not response as we don't really have the HTTP
+      // headers
+      // TODO see if can recreate HTTP headers from the metadata
+      buf.append("WARC-Type").append(": ").append("resource").append(CRLF);
+
+      // "WARC-IP-Address" if present
+      String IP = content.getMetadata().get("_ip_");
+      if (StringUtils.isNotBlank(IP)) {
+        buf.append("WARC-IP-Address").append(": ").append("IP").append(CRLF);
+      }
+
+      // detect if truncated
+      // TODO could refine the reason by comparing the length with the
+      // *.content.limit config
+      if (ParseSegment.isTruncated(content)) {
+        buf.append("WARC-Truncated").append(": ").append("unspecified")
+            .append(CRLF);
+      }
+
+      buf.append("WARC-Target-URI").append(": ").append(key.toString())
+          .append(CRLF);
 
       // finished writing the headers, now let's serialize it
 
@@ -204,8 +221,6 @@ public class WARCExporter extends Configured implements Tool {
 
     for (final Path segment : segments) {
       LOG.info("warc-exporter: adding segment: " + segment);
-      FileInputFormat.addInputPath(job,
-          new Path(segment, CrawlDatum.FETCH_DIR_NAME));
       FileInputFormat.addInputPath(job, new Path(segment, Content.DIR_NAME));
     }
 
