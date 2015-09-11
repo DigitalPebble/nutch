@@ -21,14 +21,12 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInput;
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
+import java.util.UUID;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
@@ -142,10 +140,32 @@ public class WARCExporter extends Configured implements Tool {
       buf.append(CRLF);
 
       // TODO select what we want to put there
-      // e.g. mandatory WARC fields
+      // e.g. mandatory WARC metadata
+      // WARC-Type, WARC-Date,
+      // WARC-Target-URI: http://news.bbc.co.uk/2/hi/africa/3414345.stm
+
+      // WARC-Type: warcinfo
+      // WARC-Date: 2010-10-08T07:00:26Z
+      // WARC-Filename:
+      // LOC-MONTHLY-014-20101008070022-00127-crawling111.us.archive.org.warc.gz
+      // WARC-Record-ID: <urn:uuid:05de9500-7047-4206-aa7f-346a0dc91b1f>
+      // Content-Type: application/warc-fields
+
+      // see
+      // https://github.com/iipc/webarchive-commons/blob/master/src/main/java/org/archive/format/warc/WARCRecordWriter.java
+
+      int contentLength = 0;
+      if (content != null) {
+        contentLength = content.getContent().length;
+      }
 
       buf.append("Content-Length").append(": ")
-          .append(Integer.toString(content.getContent().length)).append(CRLF);
+          .append(Integer.toString(contentLength)).append(CRLF);
+
+      buf.append("WARC-Record-ID").append(": ").append("<urn:uuid:")
+          .append(UUID.randomUUID().toString()).append(">").append(CRLF);
+
+      // finished writing the headers, now let's serialize it
 
       ByteArrayOutputStream bos = new ByteArrayOutputStream();
 
@@ -153,7 +173,9 @@ public class WARCExporter extends Configured implements Tool {
       bos.write(buf.toString().getBytes("UTF-8"));
       bos.write(CRLF_BYTES);
       // the binary content itself
-      bos.write(content.getContent());
+      if (content.getContent() != null) {
+        bos.write(content.getContent());
+      }
       bos.write(CRLF_BYTES);
       bos.write(CRLF_BYTES);
 
