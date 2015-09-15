@@ -233,9 +233,9 @@ public class HttpResponse implements Response {
         parseHeaders(in, line, httpHeaders);
         haveSeenNonContinueStatus = code != 100; // 100 is "Continue"
       }
-      
-      if (httpHeaders != null){
-        headers.add("_response.headers_", reqStr.toString());
+
+      if (httpHeaders != null) {
+        headers.add("_response.headers_", httpHeaders.toString());
       }
 
       String transferEncoding = getHeader(Response.TRANSFER_ENCODING);
