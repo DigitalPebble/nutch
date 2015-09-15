@@ -54,6 +54,8 @@ public class HttpResponse implements Response {
   private byte[] content;
   private int code;
   private Metadata headers = new SpellCheckedMetadata();
+  // used for storing the http headers verbatim
+  private StringBuffer httpHeaders;
 
   protected enum Scheme {
     HTTP, HTTPS,
@@ -125,24 +127,24 @@ public class HttpResponse implements Response {
       if (scheme == Scheme.HTTPS) {
         SSLSocketFactory factory = (SSLSocketFactory) SSLSocketFactory
             .getDefault();
-        SSLSocket sslsocket = (SSLSocket) factory.createSocket(socket,
-            sockHost, sockPort, true);
+        SSLSocket sslsocket = (SSLSocket) factory.createSocket(socket, sockHost,
+            sockPort, true);
         sslsocket.setUseClientMode(true);
 
         // Get the protocols and ciphers supported by this JVM
-        Set<String> protocols = new HashSet<String>(Arrays.asList(sslsocket
-            .getSupportedProtocols()));
-        Set<String> ciphers = new HashSet<String>(Arrays.asList(sslsocket
-            .getSupportedCipherSuites()));
+        Set<String> protocols = new HashSet<String>(
+            Arrays.asList(sslsocket.getSupportedProtocols()));
+        Set<String> ciphers = new HashSet<String>(
+            Arrays.asList(sslsocket.getSupportedCipherSuites()));
 
         // Intersect with preferred protocols and ciphers
         protocols.retainAll(http.getTlsPreferredProtocols());
         ciphers.retainAll(http.getTlsPreferredCipherSuites());
 
-        sslsocket.setEnabledProtocols(protocols.toArray(new String[protocols
-            .size()]));
-        sslsocket.setEnabledCipherSuites(ciphers.toArray(new String[ciphers
-            .size()]));
+        sslsocket.setEnabledProtocols(
+            protocols.toArray(new String[protocols.size()]));
+        sslsocket.setEnabledCipherSuites(
+            ciphers.toArray(new String[ciphers.size()]));
 
         sslsocket.startHandshake();
         socket = sslsocket;
@@ -199,25 +201,43 @@ public class HttpResponse implements Response {
       }
       reqStr.append("\r\n");
 
+      // store the request in the metadata?
+      if (conf.getBoolean("store.http.request", false) == true) {
+        headers.add("_request_", reqStr.toString());
+      }
+
       byte[] reqBytes = reqStr.toString().getBytes();
 
       req.write(reqBytes);
       req.flush();
 
       PushbackInputStream in = // process response
-      new PushbackInputStream(new BufferedInputStream(socket.getInputStream(),
-          Http.BUFFER_SIZE), Http.BUFFER_SIZE);
+      new PushbackInputStream(
+          new BufferedInputStream(socket.getInputStream(), Http.BUFFER_SIZE),
+          Http.BUFFER_SIZE);
 
       StringBuffer line = new StringBuffer();
+
+      // store the http headers verbatim
+      if (conf.getBoolean("store.http.headers", false) == true) {
+        httpHeaders = new StringBuffer();
+      }
 
       boolean haveSeenNonContinueStatus = false;
       while (!haveSeenNonContinueStatus) {
         // parse status code line
         this.code = parseStatusLine(in, line);
+        if (httpHeaders != null)
+          httpHeaders.append(line).append("\n");
         // parse headers
-        parseHeaders(in, line);
+        parseHeaders(in, line, httpHeaders);
         haveSeenNonContinueStatus = code != 100; // 100 is "Continue"
       }
+      
+      if (httpHeaders != null){
+        headers.add("_response.headers_", reqStr.toString());
+      }
+
       String transferEncoding = getHeader(Response.TRANSFER_ENCODING);
       if (transferEncoding != null
           && "chunked".equalsIgnoreCase(transferEncoding.trim())) {
@@ -274,8 +294,8 @@ public class HttpResponse implements Response {
    * -------------------------
    */
 
-  private void readPlainContent(InputStream in) throws HttpException,
-      IOException {
+  private void readPlainContent(InputStream in)
+      throws HttpException, IOException {
 
     int contentLength = Integer.MAX_VALUE; // get content length
     String contentLengthString = headers.get(Response.CONTENT_LENGTH);
@@ -376,8 +396,8 @@ public class HttpResponse implements Response {
       int chunkBytesRead = 0;
       while (chunkBytesRead < chunkLen) {
 
-        int toRead = (chunkLen - chunkBytesRead) < Http.BUFFER_SIZE ? (chunkLen - chunkBytesRead)
-            : Http.BUFFER_SIZE;
+        int toRead = (chunkLen - chunkBytesRead) < Http.BUFFER_SIZE
+            ? (chunkLen - chunkBytesRead) : Http.BUFFER_SIZE;
         int len = in.read(bytes, 0, toRead);
 
         if (len == -1)
@@ -405,7 +425,7 @@ public class HttpResponse implements Response {
     }
 
     content = out.toByteArray();
-    parseHeaders(in, line);
+    parseHeaders(in, line, null);
 
   }
 
@@ -425,15 +445,15 @@ public class HttpResponse implements Response {
     try {
       code = Integer.parseInt(line.substring(codeStart + 1, codeEnd));
     } catch (NumberFormatException e) {
-      throw new HttpException("bad status line '" + line + "': "
-          + e.getMessage(), e);
+      throw new HttpException(
+          "bad status line '" + line + "': " + e.getMessage(), e);
     }
 
     return code;
   }
 
-  private void processHeaderLine(StringBuffer line) throws IOException,
-      HttpException {
+  private void processHeaderLine(StringBuffer line)
+      throws IOException, HttpException {
 
     int colonIndex = line.indexOf(":"); // key is up to colon
     if (colonIndex == -1) {
@@ -459,10 +479,13 @@ public class HttpResponse implements Response {
   }
 
   // Adds headers to our headers Metadata
-  private void parseHeaders(PushbackInputStream in, StringBuffer line)
-      throws IOException, HttpException {
+  private void parseHeaders(PushbackInputStream in, StringBuffer line,
+      StringBuffer httpHeaders) throws IOException, HttpException {
 
     while (readLine(in, line, true) != 0) {
+
+      if (httpHeaders != null)
+        httpHeaders.append(line).append("\n");
 
       // handle HTTP responses with missing blank line after headers
       int pos;
