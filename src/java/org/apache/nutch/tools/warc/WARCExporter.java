@@ -22,6 +22,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInput;
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -95,8 +96,10 @@ public class WARCExporter extends Configured implements Tool {
       implements Mapper<Text, Writable, Text, NutchWritable>,
       Reducer<Text, NutchWritable, NullWritable, WARCWritable> {
 
-    SimpleDateFormat df = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'",
+    SimpleDateFormat warcdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'",
         Locale.ENGLISH);
+    SimpleDateFormat nutchdf = new SimpleDateFormat(
+        "EEE, d MMM yyyy HH:mm:ss z", Locale.ENGLISH);
 
     @Override
     public void configure(JobConf job) {
@@ -136,15 +139,19 @@ public class WARCExporter extends Configured implements Tool {
         return;
       }
 
-      // TODO generate a string representation of the headers
-      StringBuffer buf = new StringBuffer();
-      buf.append(WARCRecord.WARC_VERSION);
-      buf.append(CRLF);
+      // were the headers stored as is? Can write a response element then
+      String headersVerbatim = content.getMetadata().get("_response.headers_");
+      byte[] httpheaders = new byte[0];
+      if (StringUtils.isNotBlank(headersVerbatim)) {
+        // TODO check whether the headers contain the correct separator
+        httpheaders = headersVerbatim.getBytes();
+      }
 
-      // see
-      // https://github.com/iipc/webarchive-commons/blob/master/src/main/java/org/archive/format/warc/WARCRecordWriter.java
+      StringBuffer buffer = new StringBuffer();
+      buffer.append(WARCRecord.WARC_VERSION);
+      buffer.append(CRLF);
 
-      buf.append("WARC-Record-ID").append(": ").append("<urn:uuid:")
+      buffer.append("WARC-Record-ID").append(": ").append("<urn:uuid:")
           .append(UUID.randomUUID().toString()).append(">").append(CRLF);
 
       int contentLength = 0;
@@ -152,43 +159,59 @@ public class WARCExporter extends Configured implements Tool {
         contentLength = content.getContent().length;
       }
 
-      buf.append("Content-Length").append(": ")
+      // add the length of the http header
+      contentLength += httpheaders.length;
+
+      buffer.append("Content-Length").append(": ")
           .append(Integer.toString(contentLength)).append(CRLF);
 
-      // time the warc entry was generated?
-      // TODO pull the fetch time instead
-      buf.append("WARC-Date").append(": ").append(df.format(new Date()))
-          .append(CRLF);
+      try {
+        Date fetchDate = nutchdf.parse(content.getMetadata().get("Date"));
+        buffer.append("WARC-Date").append(": ").append(warcdf.format(fetchDate))
+            .append(CRLF);
 
-      // using resource and not response as we don't really have the HTTP
-      // headers
-      // TODO see if can recreate HTTP headers from the metadata
-      buf.append("WARC-Type").append(": ").append("resource").append(CRLF);
+      } catch (ParseException e) {
+        LOG.info("Can't parse date for {}", key);
+        reporter.getCounter("WARCExporter", "wrong fetch date").increment(1);
+        return;
+      }
+
+      // check if http headers have been stored verbatim
+      // if not generate a response instead
+      String WARCTypeValue = "resource";
+
+      if (StringUtils.isNotBlank(headersVerbatim)) {
+        WARCTypeValue = "response";
+      }
+
+      buffer.append("WARC-Type").append(": ").append(WARCTypeValue)
+          .append(CRLF);
 
       // "WARC-IP-Address" if present
       String IP = content.getMetadata().get("_ip_");
       if (StringUtils.isNotBlank(IP)) {
-        buf.append("WARC-IP-Address").append(": ").append("IP").append(CRLF);
+        buffer.append("WARC-IP-Address").append(": ").append("IP").append(CRLF);
       }
 
       // detect if truncated
-      // TODO could refine the reason by comparing the length with the
-      // *.content.limit config
       if (ParseSegment.isTruncated(content)) {
-        buf.append("WARC-Truncated").append(": ").append("unspecified")
+        buffer.append("WARC-Truncated").append(": ").append("unspecified")
             .append(CRLF);
       }
 
-      buf.append("WARC-Target-URI").append(": ").append(key.toString())
+      buffer.append("WARC-Target-URI").append(": ").append(key.toString())
           .append(CRLF);
 
-      // finished writing the headers, now let's serialize it
+      // finished writing the WARC headers, now let's serialize it
 
       ByteArrayOutputStream bos = new ByteArrayOutputStream();
 
       // store the headers
-      bos.write(buf.toString().getBytes("UTF-8"));
+      bos.write(buffer.toString().getBytes("UTF-8"));
       bos.write(CRLF_BYTES);
+      // the http headers
+      bos.write(httpheaders);
+
       // the binary content itself
       if (content.getContent() != null) {
         bos.write(content.getContent());
