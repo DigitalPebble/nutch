@@ -169,7 +169,10 @@ public class WARCExporter extends Configured implements Tool {
         Date fetchDate = nutchdf.parse(content.getMetadata().get("Date"));
         buffer.append("WARC-Date").append(": ").append(warcdf.format(fetchDate))
             .append(CRLF);
-
+      } catch (NullPointerException npe) {
+        LOG.info("No date found for {}", key);
+        reporter.getCounter("WARCExporter", "no date").increment(1);
+        return;
       } catch (ParseException e) {
         LOG.info("Can't parse date for {}", key);
         reporter.getCounter("WARCExporter", "wrong fetch date").increment(1);
@@ -202,6 +205,12 @@ public class WARCExporter extends Configured implements Tool {
       buffer.append("WARC-Target-URI").append(": ").append(key.toString())
           .append(CRLF);
 
+      // provide a ContentType if type response
+      if (WARCTypeValue.equals("response")) {
+        buffer.append("Content-Type: application/http; msgtype=response")
+            .append(CRLF);
+      }
+
       // finished writing the WARC headers, now let's serialize it
 
       ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -226,8 +235,8 @@ public class WARCExporter extends Configured implements Tool {
         output.collect(NullWritable.get(), new WARCWritable(record));
         reporter.getCounter("WARCExporter", "records generated").increment(1);
       } catch (IOException exception) {
-        LOG.info("Exception when generating WARC record for {} : {}", key,
-            exception.getMessage());
+        LOG.error("Exception when generating WARC record for {} : {}", key,
+            exception.getMessage(), exception);
         reporter.getCounter("WARCExporter", "exception").increment(1);
       }
 
