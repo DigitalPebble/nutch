@@ -22,7 +22,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInput;
 import java.io.DataInputStream;
 import java.io.IOException;
-import java.text.ParseException;
+import java.net.URI;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -52,6 +52,7 @@ import org.apache.hadoop.mapred.RunningJob;
 import org.apache.hadoop.mapred.SequenceFileInputFormat;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.nutch.crawl.CrawlDatum;
 import org.apache.nutch.crawl.NutchWritable;
 import org.apache.nutch.parse.ParseSegment;
 import org.apache.nutch.protocol.Content;
@@ -70,11 +71,9 @@ import com.martinkl.warc.mapred.WARCOutputFormat;
  * MapReduce job to exports Nutch segments as WARC files. The file format is
  * documented in the [ISO
  * Standard](http://bibnum.bnf.fr/warc/WARC_ISO_28500_version1_latestdraft.pdf).
- * Currently does not generate metadata about the crawler and provides entities
- * of type resource and not response; we'd need to reconstruct the HTTP headers
- * from the metadata in order to do that or modify Nutch so that it can store
- * the http headers verbatim in the content metadata (or at least the http
- * code).
+ * Generates elements of type response if the configuration 'store.http.headers'
+ * was set to true during the fetching and the http headers were stored
+ * verbatim; generates elements of type 'resource' otherwise.
  **/
 
 public class WARCExporter extends Configured implements Tool {
@@ -98,12 +97,9 @@ public class WARCExporter extends Configured implements Tool {
 
     SimpleDateFormat warcdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'",
         Locale.ENGLISH);
-    SimpleDateFormat nutchdf = new SimpleDateFormat(
-        "EEE, d MMM yyyy HH:mm:ss z", Locale.ENGLISH);
 
     @Override
     public void configure(JobConf job) {
-      // TODO anything to configure?
     }
 
     @Override
@@ -122,12 +118,17 @@ public class WARCExporter extends Configured implements Tool {
             throws IOException {
 
       Content content = null;
+      CrawlDatum cd = null;
 
       // aggregate the values found
       while (values.hasNext()) {
         final Writable value = values.next().get(); // unwrap
         if (value instanceof Content) {
           content = (Content) value;
+          continue;
+        }
+        if (value instanceof CrawlDatum) {
+          cd = (CrawlDatum) value;
           continue;
         }
       }
@@ -139,11 +140,20 @@ public class WARCExporter extends Configured implements Tool {
         return;
       }
 
+      if (cd == null) {
+        LOG.info("Missing fetch datum for {}", key);
+        reporter.getCounter("WARCExporter", "missing metadata").increment(1);
+        return;
+      }
+
       // were the headers stored as is? Can write a response element then
       String headersVerbatim = content.getMetadata().get("_response.headers_");
       byte[] httpheaders = new byte[0];
       if (StringUtils.isNotBlank(headersVerbatim)) {
-        // TODO check whether the headers contain the correct separator
+        // check that ends with an empty line
+        if (!headersVerbatim.endsWith(CRLF + CRLF)) {
+          headersVerbatim += CRLF + CRLF;
+        }
         httpheaders = headersVerbatim.getBytes();
       }
 
@@ -165,19 +175,9 @@ public class WARCExporter extends Configured implements Tool {
       buffer.append("Content-Length").append(": ")
           .append(Integer.toString(contentLength)).append(CRLF);
 
-      try {
-        Date fetchDate = nutchdf.parse(content.getMetadata().get("Date"));
-        buffer.append("WARC-Date").append(": ").append(warcdf.format(fetchDate))
-            .append(CRLF);
-      } catch (NullPointerException npe) {
-        LOG.info("No date found for {}", key);
-        reporter.getCounter("WARCExporter", "no date").increment(1);
-        return;
-      } catch (ParseException e) {
-        LOG.info("Can't parse date for {}", key);
-        reporter.getCounter("WARCExporter", "wrong fetch date").increment(1);
-        return;
-      }
+      Date fetchedDate = new Date(cd.getFetchTime());
+      buffer.append("WARC-Date").append(": ").append(warcdf.format(fetchedDate))
+          .append(CRLF);
 
       // check if http headers have been stored verbatim
       // if not generate a response instead
@@ -196,14 +196,25 @@ public class WARCExporter extends Configured implements Tool {
         buffer.append("WARC-IP-Address").append(": ").append("IP").append(CRLF);
       }
 
-      // detect if truncated
-      if (ParseSegment.isTruncated(content)) {
+      // detect if truncated only for fetch success
+      String status = CrawlDatum.getStatusName(cd.getStatus());
+      if (status.equalsIgnoreCase("STATUS_FETCH_SUCCESS")
+          && ParseSegment.isTruncated(content)) {
         buffer.append("WARC-Truncated").append(": ").append("unspecified")
             .append(CRLF);
       }
 
-      buffer.append("WARC-Target-URI").append(": ").append(key.toString())
-          .append(CRLF);
+      // must be a valid URI
+      try {
+        String normalised = key.toString().replaceAll(" ", "%20");
+        URI uri = URI.create(normalised);
+        buffer.append("WARC-Target-URI").append(": ")
+            .append(uri.toASCIIString()).append(CRLF);
+      } catch (Exception e) {
+        LOG.error("Invalid URI {} ", key);
+        reporter.getCounter("WARCExporter", "invalid URI").increment(1);
+        return;
+      }
 
       // provide a ContentType if type response
       if (WARCTypeValue.equals("response")) {
@@ -254,6 +265,8 @@ public class WARCExporter extends Configured implements Tool {
     for (final Path segment : segments) {
       LOG.info("warc-exporter: adding segment: " + segment);
       FileInputFormat.addInputPath(job, new Path(segment, Content.DIR_NAME));
+      FileInputFormat.addInputPath(job,
+          new Path(segment, CrawlDatum.FETCH_DIR_NAME));
     }
 
     job.setInputFormat(SequenceFileInputFormat.class);
